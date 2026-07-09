@@ -1,0 +1,107 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pytest *)",
+      "Bash(pip *)",
+      "Bash(pip3 *)",
+      "Bash(python *)",
+      "Bash(python3 *)",
+      "Bash(git *)",
+      "Bash(ls *)",
+      "Bash(cat *)",
+      "Bash(grep *)",
+      "Bash(rg *)",
+      "Bash(find *)",
+      "Bash(mkdir *)",
+      "Bash(cp *)",
+      "Bash(mv *)",
+      "Bash(rm *)",
+      "Bash(chmod *)",
+      "Bash(chown *)",
+      "Bash(kill *)",
+      "Bash(ps *)",
+      "Bash(top *)",
+      "Bash(htop *)",
+      "Bash(free *)",
+      "Bash(df *)",
+      "Bash(du *)",
+      "Bash(curl *)",
+      "Bash(wget *)",
+      "Bash(jq *)",
+      "Bash(yq *)",
+      "Bash(uv *)",
+      "Bash(ruff *)",
+      "Bash(black *)",
+      "Bash(mypy *)",
+      "Bash(pyright *)",
+      "Bash(pylint *)",
+      "Bash(bandit *)",
+      "Bash(safety *)",
+      "Bash(pre-commit *)",
+      "Bash(python -m pytest *)",
+      "Bash(python -m ruff *)",
+      "Bash(python -m black *)",
+      "Bash(python -m mypy *)",
+      "Bash(python -m pyright *)",
+      "Bash(python -m pip *)",
+      "Bash(python -m venv *)",
+      "Bash(python -c *)",
+      "Bash(python3 -c *)",
+      "Read",
+      "Glob",
+      "Grep",
+      "Task"
+    ],
+    "deny": [
+      "Bash(rm -rf /*)",
+      "Bash(rm -rf / *)",
+      "Bash(dd if=*)",
+      "Bash(mkfs.*)",
+      "Bash(fdisk *)",
+      "Bash(shutdown *)",
+      "Bash(reboot *)",
+      "Bash(systemctl *)",
+      "Bash(service *)",
+      "Bash(iptables *)",
+      "Bash(ufw *)",
+      "Bash(firewall-cmd *)",
+      "Bash(passwd *)",
+      "Bash(useradd *)",
+      "Bash(userdel *)",
+      "Bash(chpasswd *)",
+      "Bash(visudo *)",
+      "Bash(crontab -r *)"
+    ],
+    "defaultMode": "default"
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jq -r '.tool_response.filePath // .tool_input.file_path // .tool_input.path' | { read -r f; [[ -n \"$f\" && \"$f\" == *.py ]] && ruff check --fix \"$f\" 2>/dev/null || true; ruff format \"$f\" 2>/dev/null || true; }",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  },
+  "env": {
+    "PYTHONPATH": ".",
+    "PYTHONUNBUFFERED": "1",
+    "PYTHONDONTWRITEBYTECODE": "1"
+  },
+  "model": "sonnet",
+  "cleanupPeriodDays": 30,
+  "respectGitignore": true,
+  "spinnerTipsEnabled": true,
+  "fileCheckpointingEnabled": true,
+  "terminalProgressBarEnabled": true,
+  "todoFeatureEnabled": true,
+  "showTurnDuration": true,
+  "showMessageTimestamps": true,
+  "autoScrollEnabled": true,
+  "wheelScrollAccelerationEnabled": true
+}
