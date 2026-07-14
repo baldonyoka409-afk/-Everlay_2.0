@@ -2,10 +2,11 @@
 Web API for Everlay - FastAPI application.
 """
 import asyncio
+import json
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime
-from typing import Any, AsyncGenerator, Dict, List, Optional
+from typing import Any, AsyncGenerator, Dict, List, Optional, Set
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Depends
 from fastapi.middleware.cors import CORSMiddleware
@@ -19,8 +20,72 @@ from core.exceptions import EverlayError
 from core.openrouter_client import get_client, close_client, Message
 from agents.presets import AgentFactory, DefaultAgent, CodeAgent, ChatAgent
 from agents.base import AgentContext, AgentStatus, BaseAgent
+from agents.remote_tools import get_remote_tools, RemoteControlTool
 
 logger = get_logger(__name__)
+
+# Global remote control server
+_remote_server = None
+
+
+def get_remote_server():
+    global _remote_server
+    if _remote_server is None:
+        _remote_server = RemoteControlServer()
+    return _remote_server
+
+
+class RemoteControlServer:
+    """Manages remote control sessions and WebSocket connections."""
+
+    def __init__(self):
+        self.active_sessions: Dict[str, Dict] = {}
+        self.websocket_clients: Set[WebSocket] = set()
+
+    async def register_client(self, websocket: WebSocket, session_id: str):
+        """Register a new WebSocket client."""
+        self.websocket_clients.add(websocket)
+        self.active_sessions[session_id] = {
+            "websocket": websocket,
+            "connected_at": datetime.utcnow(),
+            "last_activity": datetime.utcnow(),
+        }
+        logger.info(f"Remote client connected: {session_id}")
+
+    async def unregister_client(self, websocket: WebSocket, session_id: str):
+        """Unregister a WebSocket client."""
+        self.websocket_clients.discard(websocket)
+        self.active_sessions.pop(session_id, None)
+        logger.info(f"Remote client disconnected: {session_id}")
+
+    async def broadcast(self, message: dict):
+        """Broadcast message to all connected clients."""
+        if not self.websocket_clients:
+            return
+        data = json.dumps(message)
+        disconnected = set()
+        for ws in self.websocket_clients:
+            try:
+                await ws.send_text(data)
+            except Exception:
+                disconnected.add(ws)
+        for ws in disconnected:
+            self.websocket_clients.discard(ws)
+
+    def get_status(self) -> dict:
+        """Get server status."""
+        return {
+            "active_sessions": len(self.active_sessions),
+            "websocket_clients": len(self.websocket_clients),
+            "sessions": [
+                {
+                    "id": sid,
+                    "connected_at": s["connected_at"].isoformat(),
+                    "last_activity": s["last_activity"].isoformat(),
+                }
+                for sid, s in self.active_sessions.items()
+            ]
+        }
 
 
 # Pydantic models
@@ -273,76 +338,194 @@ async def chat_stream(websocket: WebSocket):
         await websocket.close()
 
 
-@app.get("/api/sessions", response_model=List[SessionInfo])
-async def list_sessions():
-    """List all active sessions."""
-    return session_manager.list_sessions()
+# ===== Remote Control WebSocket Endpoints =====
 
+@app.websocket("/api/remote/control")
+async def remote_control_ws(websocket: WebSocket):
+    """WebSocket endpoint for remote PC control."""
+    await websocket.accept()
+    session_id = str(uuid.uuid4())
+    server = get_remote_server()
+    await server.register_client(websocket, session_id)
 
-@app.get("/api/sessions/{conversation_id}", response_model=SessionInfo)
-async def get_session(conversation_id: str):
-    """Get session info."""
-    session = session_manager.get_session(conversation_id)
-    if not session:
-        raise HTTPException(status_code=404, detail="Session not found")
-
-    return SessionInfo(
-        conversation_id=session["conversation_id"],
-        agent=session["agent_type"],
-        model=session["agent"].model,
-        message_count=session["message_count"],
-        created_at=session["created_at"],
-        updated_at=session["updated_at"],
-    )
-
-
-@app.delete("/api/sessions/{conversation_id}")
-async def delete_session(conversation_id: str):
-    """Delete a session."""
-    if session_manager.delete_session(conversation_id):
-        return {"success": True}
-    raise HTTPException(status_code=404, detail="Session not found")
-
-
-@app.post("/api/sessions/{conversation_id}/clear")
-async def clear_session(conversation_id: str):
-    """Clear session history."""
-    session = session_manager.get_session(conversation_id)
-    if not session:
-        raise HTTPException(status_code=404, detail="Session not found")
-
-    session["agent"].clear_history()
-    session["message_count"] = 0
-    session["updated_at"] = datetime.utcnow()
-
-    return {"success": True}
-
-
-@app.get("/api/models")
-async def list_models():
-    """List available models from OpenRouter."""
     try:
-        client = get_client()
-        models = await client.list_models()
-        return {"models": models}
+        # Send welcome message
+        await websocket.send_json({
+            "type": "welcome",
+            "session_id": session_id,
+            "message": "Connected to Everlay Remote Control",
+            "capabilities": [
+                "file_manager", "process_manager", "system_control",
+                "clipboard", "screen_capture", "shell", "network"
+            ]
+        })
+
+        while True:
+            data = await websocket.receive_json()
+
+            # Update activity
+            if session_id in server.active_sessions:
+                server.active_sessions[session_id]["last_activity"] = datetime.utcnow()
+
+            msg_type = data.get("type")
+
+            if msg_type == "ping":
+                await websocket.send_json({"type": "pong", "timestamp": datetime.utcnow().isoformat()})
+                continue
+
+            if msg_type == "execute":
+                # Execute remote command
+                module = data.get("module")
+                action = data.get("action")
+                params = data.get("params", {})
+                request_id = data.get("request_id", str(uuid.uuid4()))
+
+                try:
+                    # Get remote control tool
+                    tools = get_remote_tools()
+                    rc_tool = None
+                    for t in tools:
+                        if isinstance(t, RemoteControlTool):
+                            rc_tool = t
+                            break
+
+                    if not rc_tool:
+                        raise ValueError("Remote control tool not available")
+
+                    result = await rc_tool.execute(
+                        module=data.get("module"),
+                        action=action,
+                        params=data.get("params", {})
+                    )
+
+                    await websocket.send_json({
+                        "type": "result",
+                        "request_id": request_id,
+                        "success": True,
+                        "result": result
+                    })
+                except Exception as e:
+                    logger.error(f"Remote execute error: {e}")
+                    await websocket.send_json({
+                        "type": "result",
+                        "request_id": request_id,
+                        "success": False,
+                        "error": str(e)
+                    })
+                continue
+
+            elif msg_type == "subscribe":
+                # Subscribe to events
+                events = data.get("events", [])
+                await websocket.send_json({
+                    "type": "subscribed",
+                    "events": events
+                })
+                continue
+
+            # Unknown message type
+            await websocket.send_json({
+                "type": "error",
+                "message": f"Unknown message type: {msg_type}"
+            })
+
+    except WebSocketDisconnect:
+        logger.info(f"Remote control disconnected: {session_id}")
     except Exception as e:
-        logger.error(f"Error listing models: {e}")
+        logger.error(f"Remote control WebSocket error: {e}")
+    finally:
+        await server.unregister_client(websocket, session_id)
+
+
+@app.websocket("/api/remote/events")
+async def remote_events_ws(websocket: WebSocket):
+    """WebSocket for server-sent events (system monitoring)."""
+    await websocket.accept()
+    session_id = str(uuid.uuid4())
+    server = get_remote_server()
+    await server.register_client(websocket, session_id)
+
+    try:
+        # Send initial system info
+        import psutil
+        await websocket.send_json({
+            "type": "system_info",
+            "cpu_percent": psutil.cpu_percent(interval=0.1),
+            "memory": dict(psutil.virtual_memory()._asdict()),
+            "disk": {p.mountpoint: dict(psutil.disk_usage(p.mountpoint)._asdict())
+                     for p in psutil.disk_partitions() if p.fstype},
+            "network": dict(psutil.net_io_counters()._asdict()),
+        })
+
+        # Send periodic updates
+        while True:
+            await asyncio.sleep(2)
+            await websocket.send_json({
+                "type": "metrics",
+                "cpu_percent": psutil.cpu_percent(interval=0.1),
+                "memory_percent": psutil.virtual_memory().percent,
+                "timestamp": datetime.utcnow().isoformat(),
+            })
+
+    except WebSocketDisconnect:
+        logger.info(f"Events WebSocket disconnected: {session_id}")
+    except Exception as e:
+        logger.error(f"Events WebSocket error: {e}")
+    finally:
+        await server.unregister_client(websocket, session_id)
+
+
+# REST API for remote control
+class RemoteExecuteRequest(BaseModel):
+    module: str
+    action: str
+    params: Dict[str, Any] = {}
+
+
+@app.post("/api/remote/execute")
+async def remote_execute(request: RemoteExecuteRequest):
+    """Execute remote command via REST."""
+    try:
+        tools = get_remote_tools()
+        rc_tool = None
+        for t in tools:
+            if isinstance(t, RemoteControlTool):
+                rc_tool = t
+                break
+
+        if not rc_tool:
+            raise HTTPException(status_code=500, detail="Remote control not available")
+
+        result = await rc_tool.execute(
+            module=request.module,
+            action=request.action,
+            params=request.params
+        )
+
+        return {"success": True, "result": result}
+    except Exception as e:
+        logger.error(f"Remote execute error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# Web UI
-@app.get("/", response_class=HTMLResponse)
-async def index():
-    """Serve the web UI."""
-    with open("web/templates/index.html", "r", encoding="utf-8") as f:
-        return HTMLResponse(content=f.read())
+@app.get("/api/remote/status")
+async def remote_status():
+    """Get remote control server status."""
+    server = get_remote_server()
+    return server.get_status()
 
 
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(
-        "api.main:app",
-        host=settings.web_host,
-        port=settings.web_port,
-        reload=settings.app_debug,
-    )
+@app.get("/api/remote/tools")
+async def remote_tools_list():
+    """List available remote control tools."""
+    tools = get_remote_tools()
+    return {
+        "tools": [
+            {
+                "name": t.name,
+                "description": t.description,
+                "parameters": t.parameters
+            }
+            for t in tools
+        ]
+    }

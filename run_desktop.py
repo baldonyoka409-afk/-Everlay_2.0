@@ -45,21 +45,9 @@ class EverlayApp:
         setup_logging(settings)
 
     def create_widgets(self):
-        # Free OpenRouter models
-        self.FREE_MODELS = [
-            "nvidia/nemotron-3-ultra-550b-a55b:free",
-            "poolside/laguna-m.1:free",
-            "nvidia/nemotron-3-super-120b-a12b:free",
-            "cohere/north-mini-code:free",
-            "poolside/laguna-xs-2.1:free",
-            "openai/gpt-oss-120b:free",
-            "nvidia/nemotron-3-nano-30b-a3b:free",
-            "google/gemma-4-31b-it:free",
-            "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
-            "nvidia/nemotron-nano-9b-v2:free",
-            "openai/gpt-oss-20b:free",
-            "openai/gpt-4o-mini",  # Default paid model
-        ]
+        settings = get_settings()
+        # Free OpenRouter models from config
+        self.FREE_MODELS = settings.free_models + settings.paid_models
 
         # Top bar - Agent selection
         top_frame = ttk.Frame(self.root, padding=10)
@@ -80,7 +68,7 @@ class EverlayApp:
 
         # Model selection
         ttk.Label(top_frame, text="Model:").pack(side=tk.LEFT, padx=(10, 5))
-        self.model_var = tk.StringVar(value="nvidia/nemotron-3-ultra-550b-a55b:free")
+        self.model_var = tk.StringVar(value=settings.openrouter_default_model)
         model_combo = ttk.Combobox(
             top_frame,
             textvariable=self.model_var,

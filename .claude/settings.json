@@ -47,10 +47,16 @@
       "Bash(python -m venv *)",
       "Bash(python -c *)",
       "Bash(python3 -c *)",
+      "Bash(npm *)",
+      "Bash(npx *)",
+      "Bash(node *)",
+      "Bash(pyinstaller *)",
       "Read",
       "Glob",
       "Grep",
-      "Task"
+      "Task",
+      "Edit",
+      "Write"
     ],
     "deny": [
       "Bash(rm -rf /*)",

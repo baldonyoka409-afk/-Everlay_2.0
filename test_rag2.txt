@@ -1,0 +1,11 @@
+ADD: ✅ Документ добавлен (ID: 5d2ae574...)
+Теги: python
+LIST: 📚 Документы в базе:
+
+• Test Doc (ID: 5d2ae574...) [python] — test
+• Test (ID: d87b3c58...) [python] — test
+• Test (ID: 938fa742...) [python] — test
+• Test Doc (ID: 08c8fb04...) [python, test] — test
+• Test Doc (ID: 3732f691...) [python, test] — test
+• Test Doc (ID: 850e993d...) [python, test] — test
+SEARCH: FAIL

@@ -2,25 +2,19 @@
 Built-in tools for agents.
 """
 import asyncio
-import base64
 import csv
-import gzip
 import io
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
-import tarfile
 import tempfile
-import zipfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from agents.base import Tool
-from core.rag import get_rag_tool, RAGTool
 
 try:
     import psutil
@@ -588,34 +582,15 @@ class ModelRouterTool(Tool):
     Tries models in order, falls back on rate limits/errors.
     """
 
-    # Free models (each has independent quota)
-    FREE_MODELS = [
-        "nvidia/nemotron-3-ultra-550b-a55b:free",
-        "poolside/laguna-m.1:free",
-        "nvidia/nemotron-3-super-120b-a12b:free",
-        "cohere/north-mini-code:free",
-        "poolside/laguna-xs-2.1:free",
-        "openai/gpt-oss-120b:free",
-        "nvidia/nemotron-3-nano-30b-a3b:free",
-        "google/gemma-4-31b-it:free",
-        "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
-        "nvidia/nemotron-nano-9b-v2:free",
-        "openai/gpt-oss-20b:free",
-    ]
-
-    # Paid models (higher limits)
-    PAID_MODELS = [
-        "openai/gpt-4o-mini",
-        "openai/gpt-4o",
-        "anthropic/claude-3.5-sonnet",
-        "google/gemini-2.5-pro",
-        "meta-llama/llama-3.1-405b-instruct",
-    ]
-
     def __init__(self):
         self.current_model_index = 0
         self.use_free = True
         self._client = None
+        # Load model lists from config
+        from core.config import get_settings
+        settings = get_settings()
+        self.FREE_MODELS = settings.free_models
+        self.PAID_MODELS = settings.paid_models
 
     @property
     def name(self) -> str:
@@ -1340,7 +1315,91 @@ class CSVTool(Tool):
                 with open(file_path, "r", encoding="utf-8") as f:
                     reader = csv_module.DictReader(f, delimiter=delimiter)
                     rows = list(reader)
-                # Simple eval-based filter (be careful in production)
+                # Safe expression evaluation using ast
+                import ast
+                import operator
+
+                # Supported operators
+                operators = {
+                    ast.Add: operator.add,
+                    ast.Sub: operator.sub,
+                    ast.Mult: operator.mul,
+                    ast.Div: operator.truediv,
+                    ast.FloorDiv: operator.floordiv,
+                    ast.Mod: operator.mod,
+                    ast.Pow: operator.pow,
+                    ast.Eq: operator.eq,
+                    ast.NotEq: operator.ne,
+                    ast.Lt: operator.lt,
+                    ast.LtE: operator.le,
+                    ast.Gt: operator.gt,
+                    ast.GtE: operator.ge,
+                    ast.And: lambda x, y: x and y,
+                    ast.Or: lambda x, y: x or y,
+                    ast.Not: operator.not_,
+                    ast.UAdd: operator.pos,
+                    ast.USub: operator.neg,
+                }
+
+                def eval_node(node, context):
+                    """Safely evaluate an AST node."""
+                    if isinstance(node, ast.Constant):  # Python 3.8+
+                        return node.value
+                    elif isinstance(node, ast.Name):
+                        if node.id in context:
+                            return context[node.id]
+                        raise ValueError(f"Unknown variable: {node.id}")
+                    elif isinstance(node, ast.BinOp):
+                        left = eval_node(node.left, context)
+                        right = eval_node(node.right, context)
+                        op_type = type(node.op)
+                        if op_type in operators:
+                            return operators[op_type](left, right)
+                        raise ValueError(f"Unsupported operator: {op_type}")
+                    elif isinstance(node, ast.Compare):
+                        left = eval_node(node.left, context)
+                        for op, comparator in zip(node.ops, node.comparators):
+                            right = eval_node(comparator, context)
+                            op_type = type(op)
+                            if op_type in operators:
+                                if not operators[op_type](left, right):
+                                    return False
+                                left = right
+                            else:
+                                raise ValueError(f"Unsupported comparison: {op_type}")
+                        return True
+                    elif isinstance(node, ast.BoolOp):
+                        values = [eval_node(v, context) for v in node.values]
+                        op_type = type(node.op)
+                        if op_type == ast.And:
+                            return all(values)
+                        elif op_type == ast.Or:
+                            return any(values)
+                        raise ValueError(f"Unsupported bool operator: {op_type}")
+                    elif isinstance(node, ast.UnaryOp):
+                        operand = eval_node(node.operand, context)
+                        op_type = type(node.op)
+                        if op_type in operators:
+                            return operators[op_type](operand)
+                        raise ValueError(f"Unsupported unary operator: {op_type}")
+                    else:
+                        raise ValueError(f"Unsupported expression type: {type(node).__name__}")
+
+                def safe_eval(expr, context):
+                    """Safely evaluate a simple expression."""
+                    try:
+                        tree = ast.parse(expr, mode='eval')
+                        return eval_node(tree.body, context)
+                    except Exception as e:
+                        raise ValueError(f"Invalid expression: {e}")
+
+                # Parse query once
+                try:
+                    # Test parse
+                    ast.parse(query, mode='eval')
+                except SyntaxError as e:
+                    return f"Invalid query syntax: {e}"
+
                 filtered = []
                 for row in rows:
                     # Convert values for comparison
@@ -1350,8 +1409,12 @@ class CSVTool(Tool):
                             test_row[k] = float(v) if "." in v else int(v)
                         except:
                             test_row[k] = v
-                    if eval(query, {"__builtins__": {}}, test_row):
-                        filtered.append(row)
+                    try:
+                        if safe_eval(query, test_row):
+                            filtered.append(row)
+                    except Exception as e:
+                        return f"Error evaluating query: {e}"
+
                 return f"Matched {len(filtered)} rows:\n" + "\n".join(delimiter.join(str(r.get(c, "")) for c in rows[0].keys()) for r in filtered[:50])
 
             elif action == "columns":
@@ -1396,6 +1459,150 @@ class CSVTool(Tool):
 
         except Exception as e:
             return f"Error: {e}"
+
+
+class RAGTool(Tool):
+    """Инструмент для работы с RAG системой (база знаний)."""
+
+    def __init__(self):
+        # Ленивая инициализация чтобы избежать циклических импортов
+        self._db = None
+        self._embedder = None
+
+    @property
+    def name(self) -> str:
+        return "rag"
+
+    @property
+    def description(self) -> str:
+        return "Работа с базой знаний: добавление документов, семантический поиск, теги."
+
+    @property
+    def parameters(self) -> Dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["add", "search", "get", "list", "delete", "tags"],
+                    "description": "Действие"
+                },
+                "title": {"type": "string", "description": "Заголовок документа (для add)"},
+                "content": {"type": "string", "description": "Содержимое документа (для add)"},
+                "source": {"type": "string", "description": "Источник (файл, URL, заметка)"},
+                "tags": {"type": "array", "items": {"type": "string"}, "description": "Теги"},
+                "query": {"type": "string", "description": "Поисковый запрос (для search)"},
+                "top_k": {"type": "integer", "description": "Количество результатов", "default": 5},
+                "doc_id": {"type": "string", "description": "ID документа (для get/delete)"},
+                "tag_name": {"type": "string", "description": "Имя тега (для tags)"},
+                "tag_color": {"type": "string", "description": "Цвет тега (hex)", "default": "#4ec9b0"}
+            },
+            "required": ["action"]
+        }
+
+    def _get_db(self):
+        if self._db is None:
+            from core.rag import RAGDatabase
+            self._db = RAGDatabase()
+        return self._db
+
+    def _get_embedder(self):
+        if self._embedder is None:
+            from core.rag import EmbeddingProvider
+            self._embedder = EmbeddingProvider()
+        return self._embedder
+
+    async def execute(self, **kwargs) -> str:
+        action = kwargs.get("action")
+
+        try:
+            if action == "add":
+                title = kwargs.get("title", "Без названия")
+                content = kwargs.get("content", "")
+                source = kwargs.get("source", "")
+                tags = kwargs.get("tags", [])
+
+                # Получаем эмбеддинг
+                embedding = await self._get_embedder().get_embedding(content)
+
+                doc_id = self._get_db().add_document(
+                    title=title,
+                    content=content,
+                    source=source,
+                    tags=tags,
+                    embedding=embedding
+                )
+                return f"✅ Документ добавлен (ID: {doc_id[:8]}...)\nТеги: {', '.join(tags) if tags else 'нет'}"
+
+            elif action == "search":
+                query = kwargs.get("query", "")
+                top_k = kwargs.get("top_k", 5)
+                if not query:
+                    return "❌ Пустой запрос"
+
+                embedding = await self._get_embedder().get_embedding(query)
+                results = self._get_db().search_similar(embedding, top_k=top_k)
+
+                if not results:
+                    return "🔍 Ничего не найдено"
+
+                out = [f"🔍 Найдено {len(results)} результатов:\n"]
+                for i, r in enumerate(results, 1):
+                    tags_str = f" [{', '.join(r['tags'])}]" if r['tags'] else ""
+                    out.append(f"{i}. **{r['title']}** (score: {r['score']:.3f}){tags_str}")
+                    out.append(f"   {r['content'][:200]}...")
+                    out.append(f"   Источник: {r['source'] or 'не указан'}")
+                    out.append("")
+                return "\n".join(out)
+
+            elif action == "get":
+                doc_id = kwargs.get("doc_id", "")
+                doc = self._get_db().get_document(doc_id)
+                if not doc:
+                    return f"❌ Документ не найден: {doc_id}"
+                tags_str = f"\nТеги: {', '.join(doc['tags'])}" if doc['tags'] else ""
+                return f"📄 **{doc['title']}**\nID: {doc['id']}\nИсточник: {doc['source'] or 'не указан'}{tags_str}\n\n{doc['content']}"
+
+            elif action == "list":
+                docs = self._get_db().list_documents(limit=20)
+                if not docs:
+                    return "📭 База пуста"
+                out = ["📚 Документы в базе:\n"]
+                for d in docs:
+                    import json
+                    try:
+                        tags = json.loads(d['tags']) if d['tags'] else []
+                    except:
+                        tags = []
+                    tags_str = f" [{', '.join(tags)}]" if tags else ""
+                    out.append(f"• {d['title']} (ID: {d['id'][:8]}...){tags_str} — {d['source'] or 'нет источника'}")
+                return "\n".join(out)
+
+            elif action == "delete":
+                doc_id = kwargs.get("doc_id", "")
+                if self._get_db().delete_document(doc_id):
+                    return f"🗑️ Документ удалён: {doc_id}"
+                return f"❌ Не найден: {doc_id}"
+
+            elif action == "tags":
+                tag_name = kwargs.get("tag_name", "")
+                tag_color = kwargs.get("tag_color", "#4ec9b0")
+                if tag_name:
+                    self._get_db().add_tag(tag_name, tag_color)
+                    return f"🏷️ Тег добавлен: {tag_name}"
+                tags = self._get_db().get_tags()
+                if not tags:
+                    return "🏷️ Тегов нет"
+                return "🏷️ Теги:\n" + "\n".join(f"• {t['name']} ({t['color']})" for t in tags)
+
+            else:
+                return f"❌ Неизвестное действие: {action}"
+
+        except Exception as e:
+            from core.logging_config import get_logger
+            logger = get_logger(__name__)
+            logger.error(f"RAG error: {e}")
+            return f"❌ Ошибка RAG: {e}"
 
 
 # Tool registry

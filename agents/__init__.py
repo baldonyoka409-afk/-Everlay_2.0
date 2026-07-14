@@ -29,6 +29,14 @@ from .tools import (
     BUILTIN_TOOLS,
     get_builtin_tools,
 )
+from .remote_tools import (
+    RemoteControlTool,
+    FileManagerTool,
+    ProcessManagerTool,
+    SystemControlTool,
+    get_remote_tools,
+    REMOTE_TOOLS,
+)
 from .presets import (
     DefaultAgent,
     CodeAgent,
@@ -46,6 +54,7 @@ __all__ = [
     "AgentStatus",
     "Tool",
     "get_builtin_tools",
+    "get_remote_tools",
     "FileReadTool",
     "FileWriteTool",
     "FileListTool",
@@ -64,6 +73,11 @@ __all__ = [
     "ResourceMonitorTool",
     "ModelRouterTool",
     "BUILTIN_TOOLS",
+    "RemoteControlTool",
+    "FileManagerTool",
+    "ProcessManagerTool",
+    "SystemControlTool",
+    "REMOTE_TOOLS",
     "DefaultAgent",
     "CodeAgent",
     "ChatAgent",

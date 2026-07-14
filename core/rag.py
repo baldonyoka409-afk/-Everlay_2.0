@@ -12,7 +12,6 @@ from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime
 
 import numpy as np
-from agents.base import Tool
 from core.config import get_settings
 from core.logging_config import get_logger
 
@@ -20,19 +19,30 @@ logger = get_logger(__name__)
 
 
 class EmbeddingProvider:
-    """Провайдер эмбеддингов - OpenRouter или локальный (Ollama)."""
+    """Провайдер эмбеддингов - Ollama (локально), OpenRouter или hash-based фоллбэк."""
 
     def __init__(self):
         self.settings = get_settings()
         self._client = None
         self._local_available = False
+        self._provider = self.settings.embedding_provider.lower()
 
     async def get_embedding(self, text: str) -> List[float]:
-        """Получить эмбеддинг для текста."""
-        # Сначала пробуем локальный (быстрее и бесплатно)
+        """Получить эмбеддинг для текста согласно настроенному провайдеру."""
+        # Если задан конкретный провайдер (не auto)
+        if self._provider == "ollama":
+            if await self._check_local():
+                return await self._get_local_embedding(text)
+            return self._hash_embedding(text)
+        elif self._provider == "openrouter":
+            return await self._get_openrouter_embedding(text)
+        elif self._provider == "hash":
+            return self._hash_embedding(text)
+
+        # auto: Ollama -> OpenRouter -> hash
         if await self._check_local():
             return await self._get_local_embedding(text)
-        # Фолбэк на OpenRouter
+
         return await self._get_openrouter_embedding(text)
 
     async def _check_local(self) -> bool:
@@ -41,47 +51,48 @@ class EmbeddingProvider:
             return True
         try:
             import aiohttp
+            timeout = aiohttp.ClientTimeout(total=self.settings.ollama_timeout_seconds)
             async with aiohttp.ClientSession() as session:
-                async with session.get("http://localhost:11434/api/tags", timeout=aiohttp.ClientTimeout(total=2)) as resp:
+                async with session.get(
+                    f"{self.settings.ollama_base_url}/api/tags",
+                    timeout=timeout
+                ) as resp:
                     self._local_available = resp.status == 200
         except Exception:
             self._local_available = False
         return self._local_available
 
     async def _get_local_embedding(self, text: str) -> List[float]:
-        """Получить эмбеддинг через локальный Ollama (nomic-embed-text)."""
+        """Получить эмбеддинг через локальный Ollama."""
         import aiohttp
+        timeout = aiohttp.ClientTimeout(total=self.settings.ollama_timeout_seconds)
         async with aiohttp.ClientSession() as session:
             async with session.post(
-                "http://localhost:11434/api/embeddings",
-                json={"model": "nomic-embed-text", "prompt": text}
+                f"{self.settings.ollama_base_url}/api/embeddings",
+                json={"model": self.settings.ollama_embedding_model, "prompt": text},
+                timeout=timeout
             ) as resp:
-                data = await resp.json()
-                return data.get("embedding", [])
+                if resp.status == 200:
+                    data = await resp.json()
+                    return data.get("embedding", [])
+                # Если ошибка - фоллбэк
+                return self._hash_embedding(text)
 
     async def _get_openrouter_embedding(self, text: str) -> List[float]:
-        """Получить эмбеддинг через OpenRouter."""
-        from core.openrouter_client import get_client
-        client = get_client()
-        # Используем text-embedding-3-small или доступную модель
-        response = await client.chat_completion(
-            messages=[{"role": "user", "content": text}],
-            model="text-embedding-3-small",
-            max_tokens=1
-        )
-        # OpenRouter не даёт эмбеддинги напрямую через chat_completion
-        # Используем fallback - простой hash-based вектор
+        """OpenRouter не поддерживает эмбеддинги через chat/completions.
+        Возвращаем hash-based как фоллбэк."""
+        # OpenRouter не имеет отдельного /embeddings эндпоинта
+        # Если появится - раскомментировать и реализовать
         return self._hash_embedding(text)
 
     def _hash_embedding(self, text: str, dim: int = 384) -> List[float]:
-        """Простой детерминированный эмбеддинг на основе хеша (fallback)."""
-        # Создаём псевдо-эмбеддинг из хешей частей текста
+        """Простой детерминированный эмбеддинг на основе хеша (fallback).
+        НЕ подходит для семантического поиска - только для совместимости."""
         chunks = [text[i:i+100] for i in range(0, len(text), 100)]
         vec = np.zeros(dim)
         for i, chunk in enumerate(chunks[:dim]):
             h = int(hashlib.md5(chunk.encode()).hexdigest(), 16)
             vec[i % dim] = (h % 10000) / 10000.0 - 0.5
-        # Нормализуем
         norm = np.linalg.norm(vec)
         if norm > 0:
             vec = vec / norm
@@ -91,7 +102,10 @@ class EmbeddingProvider:
 class RAGDatabase:
     """SQLite база для хранения документов и эмбеддингов."""
 
-    def __init__(self, db_path: str = "everlay_brain.db"):
+    def __init__(self, db_path: str = None):
+        if db_path is None:
+            from core.config import get_settings
+            db_path = get_settings().rag_db_path
         self.db_path = Path(db_path).resolve()
         self._init_db()
 
@@ -261,137 +275,14 @@ class RAGDatabase:
             return [dict(row) for row in cursor.fetchall()]
 
 
-class RAGTool(Tool):
-    """Инструмент для работы с RAG системой."""
-
-    def __init__(self):
-        self.db = RAGDatabase()
-        self.embedder = EmbeddingProvider()
-
-    @property
-    def name(self) -> str:
-        return "rag"
-
-    @property
-    def description(self) -> str:
-        return "Работа с базой знаний: добавление документов, семантический поиск, теги."
-
-    @property
-    def parameters(self) -> Dict[str, Any]:
-        return {
-            "type": "object",
-            "properties": {
-                "action": {
-                    "type": "string",
-                    "enum": ["add", "search", "get", "list", "delete", "tags"],
-                    "description": "Действие"
-                },
-                "title": {"type": "string", "description": "Заголовок документа (для add)"},
-                "content": {"type": "string", "description": "Содержимое документа (для add)"},
-                "source": {"type": "string", "description": "Источник (файл, URL, заметка)"},
-                "tags": {"type": "array", "items": {"type": "string"}, "description": "Теги"},
-                "query": {"type": "string", "description": "Поисковый запрос (для search)"},
-                "top_k": {"type": "integer", "description": "Количество результатов", "default": 5},
-                "doc_id": {"type": "string", "description": "ID документа (для get/delete)"},
-                "tag_name": {"type": "string", "description": "Имя тега (для tags)"},
-                "tag_color": {"type": "string", "description": "Цвет тега (hex)", "default": "#4ec9b0"}
-            },
-            "required": ["action"]
-        }
-
-    async def execute(self, **kwargs) -> str:
-        action = kwargs.get("action")
-
-        try:
-            if action == "add":
-                title = kwargs.get("title", "Без названия")
-                content = kwargs.get("content", "")
-                source = kwargs.get("source", "")
-                tags = kwargs.get("tags", [])
-
-                # Получаем эмбеддинг
-                embedding = await self.embedder.get_embedding(content)
-
-                doc_id = self.db.add_document(
-                    title=title,
-                    content=content,
-                    source=source,
-                    tags=tags,
-                    embedding=embedding
-                )
-                return f"✅ Документ добавлен (ID: {doc_id[:8]}...)\nТеги: {', '.join(tags) if tags else 'нет'}"
-
-            elif action == "search":
-                query = kwargs.get("query", "")
-                top_k = kwargs.get("top_k", 5)
-                if not query:
-                    return "❌ Пустой запрос"
-
-                embedding = await self.embedder.get_embedding(query)
-                results = self.db.search_similar(embedding, top_k=top_k)
-
-                if not results:
-                    return "🔍 Ничего не найдено"
-
-                out = [f"🔍 Найдено {len(results)} результатов:\n"]
-                for i, r in enumerate(results, 1):
-                    tags_str = f" [{', '.join(r['tags'])}]" if r['tags'] else ""
-                    out.append(f"{i}. **{r['title']}** (score: {r['score']:.3f}){tags_str}")
-                    out.append(f"   {r['content'][:200]}...")
-                    out.append(f"   Источник: {r['source'] or 'не указан'}")
-                    out.append("")
-                return "\n".join(out)
-
-            elif action == "get":
-                doc_id = kwargs.get("doc_id", "")
-                doc = self.db.get_document(doc_id)
-                if not doc:
-                    return f"❌ Документ не найден: {doc_id}"
-                tags_str = f"\nТеги: {', '.join(doc['tags'])}" if doc['tags'] else ""
-                return f"📄 **{doc['title']}**\nID: {doc['id']}\nИсточник: {doc['source'] or 'не указан'}{tags_str}\n\n{doc['content']}"
-
-            elif action == "list":
-                docs = self.db.list_documents(limit=20)
-                if not docs:
-                    return "📭 База пуста"
-                out = ["📚 Документы в базе:\n"]
-                for d in docs:
-                    tags_str = f" [{', '.join(json.loads(d['tags']))}]" if d['tags'] else ""
-                    out.append(f"• {d['title']} (ID: {d['id'][:8]}...){tags_str} — {d['source'] or 'нет источника'}")
-                return "\n".join(out)
-
-            elif action == "delete":
-                doc_id = kwargs.get("doc_id", "")
-                if self.db.delete_document(doc_id):
-                    return f"🗑️ Документ удалён: {doc_id}"
-                return f"❌ Не найден: {doc_id}"
-
-            elif action == "tags":
-                tag_name = kwargs.get("tag_name", "")
-                tag_color = kwargs.get("tag_color", "#4ec9b0")
-                if tag_name:
-                    self.db.add_tag(tag_name, tag_color)
-                    return f"🏷️ Тег добавлен: {tag_name}"
-                tags = self.db.get_tags()
-                if not tags:
-                    return "🏷️ Тегов нет"
-                return "🏷️ Теги:\n" + "\n".join(f"• {t['name']} ({t['color']})" for t in tags)
-
-            else:
-                return f"❌ Неизвестное действие: {action}"
-
-        except Exception as e:
-            logger.error(f"RAG error: {e}")
-            return f"❌ Ошибка RAG: {e}"
+# Глобальный экземпляр RAGTool (lazy import чтобы избежать циклических импортов)
+_rag_tool: Optional["RAGTool"] = None
 
 
-# Глобальный экземпляр
-_rag_tool: Optional[RAGTool] = None
-
-
-def get_rag_tool() -> RAGTool:
-    """Получить глобальный RAG инструмент."""
+def get_rag_tool() -> "RAGTool":
+    """Получить глобальный RAG инструмент (lazy import)."""
     global _rag_tool
     if _rag_tool is None:
+        from agents.tools import RAGTool
         _rag_tool = RAGTool()
     return _rag_tool

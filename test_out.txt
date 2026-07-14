@@ -1,0 +1,7 @@
+Add: ✅ Документ добавлен (ID: 08c8fb04...)
+Теги: python, test
+List: 📚 Документы в базе:
+
+• Test Doc (ID: 08c8fb04...) [python, test] — test
+• Test Doc (ID: 3732f691...) [python, test] — test
+• Test Doc (ID: 850e993d...) [python, test] — test

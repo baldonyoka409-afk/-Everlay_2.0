@@ -18,13 +18,15 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # OpenRouter API Configuration
-    openrouter_api_key: str = Field(..., validation_alias="OPENROUTER_API_KEY")
+    # OpenRouter API Configuration (required for all modes)
+    openrouter_api_key: str = Field(
+        default="", validation_alias="OPENROUTER_API_KEY"
+    )
     openrouter_base_url: str = Field(
         default="https://openrouter.ai/api/v1", validation_alias="OPENROUTER_BASE_URL"
     )
     openrouter_default_model: str = Field(
-        default="openai/gpt-4o-mini", validation_alias="OPENROUTER_DEFAULT_MODEL"
+        default="nvidia/nemotron-3-ultra-550b-a55b:free", validation_alias="OPENROUTER_DEFAULT_MODEL"
     )
     openrouter_http_referer: Optional[str] = Field(
         default=None, validation_alias="OPENROUTER_HTTP_REFERER"
@@ -33,8 +35,46 @@ class Settings(BaseSettings):
         default=None, validation_alias="OPENROUTER_X_TITLE"
     )
 
-    # Telegram Bot Configuration
-    telegram_bot_token: str = Field(..., validation_alias="TELEGRAM_BOT_TOKEN")
+    # Model lists (centralized)
+    free_models: List[str] = Field(
+        default_factory=lambda: [
+            "nvidia/nemotron-3-ultra-550b-a55b:free",
+            "poolside/laguna-m.1:free",
+            "nvidia/nemotron-3-super-120b-a12b:free",
+            "cohere/north-mini-code:free",
+            "poolside/laguna-xs-2.1:free",
+            "openai/gpt-oss-120b:free",
+            "nvidia/nemotron-3-nano-30b-a3b:free",
+            "google/gemma-4-31b-it:free",
+            "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+            "nvidia/nemotron-nano-9b-v2:free",
+            "openai/gpt-oss-20b:free",
+        ],
+        validation_alias="OPENROUTER_FREE_MODELS"
+    )
+    paid_models: List[str] = Field(
+        default_factory=lambda: [
+            "openai/gpt-4o-mini",
+            "openai/gpt-4o",
+            "anthropic/claude-3.5-sonnet",
+            "google/gemini-2.5-pro",
+            "meta-llama/llama-3.1-405b-instruct",
+        ],
+        validation_alias="OPENROUTER_PAID_MODELS"
+    )
+
+    # Ollama Configuration (local embeddings)
+    ollama_base_url: str = Field(default="http://localhost:11434", validation_alias="OLLAMA_BASE_URL")
+    ollama_embedding_model: str = Field(default="nomic-embed-text", validation_alias="OLLAMA_EMBEDDING_MODEL")
+    ollama_timeout_seconds: int = Field(default=30, validation_alias="OLLAMA_TIMEOUT_SECONDS")
+
+    # Embedding provider preference: "ollama" | "openrouter" | "hash" | "auto"
+    embedding_provider: str = Field(default="auto", validation_alias="EMBEDDING_PROVIDER")
+
+    # Telegram Bot Configuration (optional for desktop)
+    telegram_bot_token: str = Field(
+        default="", validation_alias="TELEGRAM_BOT_TOKEN"
+    )
     telegram_allowed_users: List[int] = Field(
         default_factory=list, validation_alias="TELEGRAM_ALLOWED_USERS"
     )
@@ -77,6 +117,7 @@ class Settings(BaseSettings):
 
     # Database
     database_url: str = Field(default="sqlite:///./everlay.db", validation_alias="DATABASE_URL")
+    rag_db_path: str = Field(default="everlay_brain.db", validation_alias="RAG_DB_PATH")
 
     # Redis
     redis_url: str = Field(default="redis://localhost:6379/0", validation_alias="REDIS_URL")
@@ -84,7 +125,9 @@ class Settings(BaseSettings):
     # Web Interface
     web_host: str = Field(default="0.0.0.0", validation_alias="WEB_HOST")
     web_port: int = Field(default=8000, validation_alias="WEB_PORT")
-    web_secret_key: str = Field(..., validation_alias="WEB_SECRET_KEY")
+    web_secret_key: str = Field(
+        default="dev-secret-change-in-production", validation_alias="WEB_SECRET_KEY"
+    )
     web_cors_origins: List[str] = Field(
         default_factory=lambda: ["http://localhost:3000", "http://localhost:8000"],
         validation_alias="WEB_CORS_ORIGINS"

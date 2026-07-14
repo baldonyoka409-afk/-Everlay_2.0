@@ -1,0 +1,196 @@
+name: Build Android APK
+
+on:
+  push:
+    tags:
+      - 'v*'  # Trigger on version tags like v1.0.0
+    branches:
+      - main  # Also on main branch pushes
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:  # Manual trigger
+
+env:
+  BUILDOZER_VERSION: "1.5.0"
+  CYTHON_VERSION: "3.0.10"
+
+jobs:
+  build-android:
+    name: Build Android APK (${{ matrix.arch }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [arm64-v8a, armeabi-v7a]
+        include:
+          - arch: arm64-v8a
+            artifact_name: everlay-${{ github.ref_name }}-arm64
+          - arch: armeabi-v7a
+            artifact_name: everlay-${{ github.ref_name }}-armv7
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            git zip unzip openjdk-17-jdk \
+            autoconf libtool pkg-config zlib1g-dev \
+            libncurses5-dev libncursesw5-dev libtinfo5 \
+            cmake libffi-dev libssl-dev automake \
+            python3-dev libltdl-dev
+
+      - name: Cache Buildozer
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.buildozer
+            ~/.cache/pip
+          key: buildozer-${{ runner.os }}-${{ hashFiles('buildozer.spec', 'requirements.txt') }}-${{ matrix.arch }}
+          restore-keys: |
+            buildozer-${{ runner.os }}-
+
+      - name: Install Buildozer and Cython
+        run: |
+          pip install --upgrade pip setuptools wheel
+          pip install "cython==${{ env.CYTHON_VERSION }}" "buildozer==${{ env.BUILDOZER_VERSION }}"
+
+      - name: Set environment variables
+        run: |
+          echo "ANDROID_SDK_ROOT=$HOME/.buildozer/android/platform/android-sdk" >> $GITHUB_ENV
+          echo "ANDROID_NDK_ROOT=$HOME/.buildozer/android/platform/android-ndk-r25c" >> $GITHUB_ENV
+          echo "PATH=$PATH:$ANDROID_SDK_ROOT/platform-tools:$ANDROID_SDK_ROOT/tools:$ANDROID_SDK_ROOT/tools/bin" >> $GITHUB_ENV
+
+      - name: Accept Android SDK licenses
+        run: |
+          yes | $ANDROID_SDK_ROOT/tools/bin/sdkmanager --licenses > /dev/null 2>&1 || true
+          yes | $ANDROID_SDK_ROOT/tools/bin/sdkmanager "platform-tools" "platforms;android-33" "build-tools;33.0.2" "ndk;25.2.9519653" > /dev/null 2>&1
+
+      - name: Build APK (${{ matrix.arch }})
+        run: |
+          buildozer -v android debug \
+            --arch=${{ matrix.arch }} \
+            2>&1 | tee build.log
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+
+      - name: Find APK
+        id: find_apk
+        run: |
+          APK_PATH=$(find bin -name "*.apk" -path "*${{ matrix.arch }}*" | head -1)
+          if [ -z "$APK_PATH" ]; then
+            echo "APK not found!"
+            find bin -name "*.apk"
+            exit 1
+          fi
+          echo "APK_PATH=$APK_PATH" >> $GITHUB_OUTPUT
+          echo "Found: $APK_PATH"
+          ls -lh "$APK_PATH"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ steps.find_apk.outputs.APK_PATH }}
+          retention-days: 30
+
+      - name: Upload build log
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: build-log-${{ matrix.arch }}
+          path: build.log
+          retention-days: 7
+
+  build-release:
+    name: Build Release APK
+    needs: build-android
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            git zip unzip openjdk-17-jdk \
+            autoconf libtool pkg-config zlib1g-dev \
+            libncurses5-dev libncursesw5-dev libtinfo5 \
+            cmake libffi-dev libssl-dev automake \
+            python3-dev libltdl-dev
+
+      - name: Install Buildozer
+        run: |
+          pip install --upgrade pip setuptools wheel
+          pip install "cython==${{ env.CYTHON_VERSION }}" "buildozer==${{ env.BUILDOZER_VERSION }}"
+
+      - name: Build Release APK
+        run: |
+          buildozer -v android release 2>&1 | tee build-release.log
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          ANDROID_KEYSTORE: ${{ secrets.ANDROID_KEYSTORE }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+
+      - name: Find Release APK
+        id: find_release
+        run: |
+          APK_PATH=$(find bin -name "*-release.apk" | head -1)
+          if [ -z "$APK_PATH" ]; then
+            echo "Release APK not found!"
+            find bin -name "*.apk"
+            exit 1
+          fi
+          echo "APK_PATH=$APK_PATH" >> $GITHUB_OUTPUT
+          ls -lh "$APK_PATH"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        if: success()
+        with:
+          files: ${{ steps.find_release.outputs.APK_PATH }}
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt pytest pytest-asyncio
+      - name: Run tests
+        run: pytest tests/ -v

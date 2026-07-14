@@ -85,15 +85,18 @@ class OpenRouterClient:
         self.timeout = timeout
         self.max_retries = max_retries
 
-        if not self.api_key:
-            raise ConfigurationError("OpenRouter API key is required")
-
+        # Allow empty API key for desktop app (will show error when trying to use)
         self._client: Optional[httpx.AsyncClient] = None
 
     @property
     def client(self) -> httpx.AsyncClient:
         """Get or create async HTTP client."""
         if self._client is None or self._client.is_closed:
+            if not self.api_key:
+                raise ConfigurationError(
+                    "OpenRouter API key is required. "
+                    "Please set OPENROUTER_API_KEY in .env or enter it in Settings."
+                )
             headers = {
                 "Authorization": f"Bearer {self.api_key}",
                 "Content-Type": "application/json",
