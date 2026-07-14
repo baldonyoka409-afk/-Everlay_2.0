@@ -65,3 +65,7 @@ dmypy.json
 
 # Ruff
 .ruff_cache/
+# Buildozer cache
+.buildozer/
+bin/
+*.apk
