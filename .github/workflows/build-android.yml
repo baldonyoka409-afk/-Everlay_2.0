@@ -1,14 +1,9 @@
 name: Build Android APK
-jobs:
-  build:
-    name: Build APK
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
 
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
 jobs:
   build:
     name: Build APK
