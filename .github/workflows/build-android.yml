@@ -1,9 +1,13 @@
 name: Build Android APK
+jobs:
+  build:
+    name: Build APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
 
-on:
-  push:
-    branches: [main, master]
-  workflow_dispatch:
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
 
 jobs:
   build:
@@ -15,48 +19,11 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
+      - name: Build with Buildozer
+        uses: ArtemSBulgakov/buildozer-action@v1
         with:
-          distribution: 'temurin'
-          java-version: '17'
-
-      - name: Cache Buildozer
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.buildozer
-            ~/.local/share/buildozer
-          key: buildozer-${{ hashFiles('buildozer.spec') }}
-          restore-keys: |
-            buildozer-
-
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            git zip unzip openjdk-17-jdk python3-pip \
-            autoconf libtool pkg-config zlib1g-dev \
-            libncurses5-dev libncursesw5-dev libtinfo6 \
-            cmake libffi-dev libssl-dev automake \
-            patchelf
-
-      - name: Install Buildozer
-        run: |
-          pip install --user buildozer
-          echo "$HOME/.local/bin" >> $GITHUB_PATH
-
-      - name: Accept Android SDK licenses
-        run: |
-          export ANDROID_SDK_ROOT=$HOME/.buildozer/android/platform/android-sdk
-          yes | $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager --licenses || true
-          $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager "build-tools;34.0.0" "platforms;android-34" || true
-
-      - name: Build APK (debug)
-        run: |
-          cd ${{ github.workspace }}
-          export PIP_BREAK_SYSTEM_PACKAGES=1
-          buildozer -v android debug
+          command: android debug
+          buildozer_version: stable
 
       - name: Upload APK artifacts
         uses: actions/upload-artifact@v4
